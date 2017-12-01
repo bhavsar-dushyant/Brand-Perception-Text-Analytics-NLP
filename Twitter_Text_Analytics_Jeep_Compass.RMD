@@ -1,0 +1,214 @@
+---
+title: "Twitter_Text_Analytics_Jeep_Compass"
+author: "Grp 8"
+date: "November 5, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+
+library(SnowballC)
+library(tm)
+library(ggplot2)
+library(RColorBrewer)
+library(wordcloud)
+library(topicmodels)
+library(data.table)
+library(stringi)
+library(qdap)
+library(dplyr)
+library(rJava)
+library(reshape2)
+library(syuzhet)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+#####Read Twitter Data
+```{r}
+
+setwd("C:/Users/smitra0/Documents/Great Learning/WSMA")
+tweets.df <- read.csv("jeep_compass.csv",stringsAsFactors = FALSE)
+str(tweets.df)
+
+```
+#####Format Tweet data
+```{r}
+# copy first 10 char and convert char date to correct date format
+tweets.df$created <- substr(tweets.df$created, 1, 10)
+tweets.df$created <- as.Date(tweets.df$created, format= "%Y-%m-%d")
+
+# Remove character string between < >
+tweets.df$text <- genX(tweets.df$text, " <", ">")
+head(tweets.df)
+```
+##### Create document corpus with tweet text and clean up
+
+```{r}
+myCorpus<- Corpus(VectorSource(tweets.df$text)) 
+
+myCorpus <- tm_map(myCorpus,tolower)
+
+```
+
+#####Remove the links (URLs)  
+```{r}
+removeURL <- function(x) gsub("http[^[:space:]]*", "", x)
+myCorpus <- tm_map(myCorpus, content_transformer(removeURL))
+
+```
+
+#####Remove tweeter name  
+```{r}
+removeTN <- function(x) gsub("@\\w+ *", "", x)
+myCorpus1 <- tm_map(myCorpus, content_transformer(removeTN))
+
+```
+
+#####Remove anything except the english language and space  
+```{r}
+myCorpus <- tm_map(myCorpus1,removePunctuation)
+```
+
+#####Remove Stopwords  
+```{r}
+myStopWords<- c((stopwords('english')),c("jeep","compass","â€", "rt"))
+
+myCorpus<- tm_map(myCorpus,removeWords , myStopWords) 
+
+```
+#####Remove Single letter words  
+```{r}
+removeSingle <- function(x) gsub(" . ", " ", x)   
+myCorpus <- tm_map(myCorpus, content_transformer(removeSingle))
+
+```
+#####Remove numbers 
+```{r}
+myCorpus <- tm_map(myCorpus,removeNumbers)
+```
+
+#####Remove Extra Whitespaces  
+```{r}
+myCorpus<- tm_map(myCorpus, stripWhitespace) 
+
+#####keep a copy of "myCorpus" for stem completion later  
+myCorpusCopy<- myCorpus
+
+```
+#####Stem words in the corpus 
+```{r}
+myCorpus<-tm_map(myCorpus, stemDocument)
+writeLines(strwrap(myCorpus[[250]]$content,60))
+
+tdm<- TermDocumentMatrix(myCorpus, control= list(wordLengths= c(1, Inf)))
+tdm
+```
+
+#####Find the terms used most frequently
+```{r Term frequency}
+(freq.terms <- findFreqTerms(tdm, lowfreq = 20))
+term.freq <- rowSums(as.matrix(tdm))
+term.freq <- subset(term.freq, term.freq > 20)
+df <- data.frame(term = names(term.freq), freq= term.freq)
+
+```
+#####plotting the graph of frequent terms
+```{r Graph}
+ggplot(df, aes(reorder(term, freq),freq)) + theme_bw() + geom_bar(stat = "identity")  + 
+  coord_flip() +labs(list(title="Term Frequency Chart", x="Terms", y="Term Counts")) 
+
+```
+#####calculate the frequency of words and sort it by frequency and setting up the Wordcloud
+```{r WordCloud, warning=FALSE}
+word.freq <-sort(rowSums(as.matrix(tdm)), decreasing= F)
+pal<- brewer.pal(8, "Dark2")
+wordcloud(words = names(word.freq), freq = word.freq, min.freq = 50, random.order = F, colors = pal, max.words = 100)
+
+``` 
+# Identify and plot word correlations. For example - compass
+```{r Word Corr}
+toi <- "makeinindia"  # term of interest
+corlimit <- 0.2 #  lower correlation bound limit.
+WordCorr <- data.frame(corr = findAssocs(tdm, toi, corlimit)[[1]],
+                      terms = names(findAssocs(tdm, toi, corlimit)[[1]]))
+
+WordCorr$terms <- factor(WordCorr$terms ,levels = WordCorr$terms)
+
+ggplot(WordCorr, aes( y = terms  ) ) +
+  geom_point(aes(x = corr), data = WordCorr, size = 4) +
+  xlab(paste0("Correlation with the term ", "\"", toi, "\""))
+  
+```  
+##### Find association with a specific keyword in the tweets - makeinindia, makeinindia
+```{r Find Association}
+findAssocs(tdm, "makeinindia", 0.2)
+findAssocs(tdm, "madeinindia", 0.2)
+
+```
+##### Topic Modelling to identify latent/hidden topics using LDA technique
+```{r Topic Modelling, warning=FALSE}
+dtm <- as.DocumentTermMatrix(tdm)
+
+rowTotals <- apply(dtm , 1, sum)
+
+NullDocs <- dtm[rowTotals==0, ]
+dtm   <- dtm[rowTotals> 0, ]
+
+if (length(NullDocs$dimnames$Docs) > 0) {
+  tweets.df <- tweets.df[-as.numeric(NullDocs$dimnames$Docs),]
+}
+
+lda <- LDA(dtm, k = 5) # find 5 topic
+term <- terms(lda, 7) # first 7 terms of every topic
+(term <- apply(term, MARGIN = 2, paste, collapse = ", "))
+
+topics<- topics(lda)
+topics<- data.frame(date=(tweets.df$created), topic = topics)
+qplot (date, ..count.., data=topics, geom ="density", fill= term[topic], position="stack")
+
+```
+##### Sentiment Analysis to identify 
+positive/negative tweets
+```{r Sentiment Analysis}
+sentiments <-get_nrc_sentiment(tweets.df$text)
+sentiments$date <-tweets.df$created
+
+#Transpose matrix and rowsum by date
+tsentiments <-data.frame(t(sentiments))
+
+tsentiments1 <- aggregate( cbind( anger, anticipation, disgust, fear, joy, sadness, 
+                    surprise, trust, negative, positive ) ~ date , 
+                    data = sentiments , FUN = sum )
+##Create one column against date
+tsentiments2 <- melt(tsentiments1, id.vars = 'date')
+
+```
+##### Sentiment analysis by Date Graph
+```{r Sentiment Plot}
+ggplot(data=tsentiments2[1:56,], aes(x=date, y=value,group=variable, colour=variable)) +
+   geom_line() +
+   geom_point() +
+   ggtitle("Sentiment Analysis by Date")
+
+```
+##### Sentiment analysis by Date excluding Trust Graph
+```{r Sentiment Plot part 2}
+##Graph excluding trust line
+ggplot(data=tsentiments2[1:49,], aes(x=date, y=value,group=variable, colour=variable)) +
+  geom_line() +
+  geom_point() +
+  ggtitle("Sentiment Analysis by Date Excluding Trust")
+
+```
+
+##### Graph on positivity or negativity
+```{r Sentiment Plot 2}
+
+ggplot(data=tsentiments2[57:70,], aes(x=date, y=value,group=variable, colour=variable)) +
+  geom_line() +
+  geom_point() +
+  ggtitle("Positivity by Date")
+
+  
+```
